@@ -13,6 +13,9 @@ export interface Settings {
   overlayStyle: OverlayStyle;
   metric: Metric;
   timelineVisible: boolean;
+  /** A minimised timeline remains open as a title bar in the lower-right. */
+  timelineMinimized: boolean;
+  legendsVisible: boolean;
 }
 
 const STORAGE_KEY = 'cellular.viewer.settings';
@@ -23,6 +26,8 @@ export const DEFAULT_SETTINGS: Settings = {
   overlayStyle: 'change-highlight',
   metric: 'lines',
   timelineVisible: true,
+  timelineMinimized: false,
+  legendsVisible: true,
 };
 
 const MULTI_MODES: MultiCommitMode[] = ['side-by-side', 'overlay'];
@@ -54,6 +59,12 @@ export function loadSettings(): Settings {
         typeof stored.timelineVisible === 'boolean'
           ? stored.timelineVisible
           : DEFAULT_SETTINGS.timelineVisible,
+      timelineMinimized:
+        typeof stored.timelineMinimized === 'boolean'
+          ? stored.timelineMinimized
+          : DEFAULT_SETTINGS.timelineMinimized,
+      legendsVisible:
+        typeof stored.legendsVisible === 'boolean' ? stored.legendsVisible : DEFAULT_SETTINGS.legendsVisible,
     };
   } catch {
     // A browser with storage disabled still gets a working viewer.

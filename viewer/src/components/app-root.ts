@@ -149,6 +149,8 @@ export class CellularApp extends HTMLElement {
     root.addEventListener('commit-select', (event) =>
       this.setSelection((event as CustomEvent<{ oids: string[] }>).detail.oids),
     );
+    root.addEventListener('timeline-minimize', () => this.toggleTimelineMinimized());
+    root.addEventListener('timeline-close', () => this.closeTimeline());
     this.picker.addEventListener('change', () => {
       const file = this.picker.files?.[0];
       if (file) void this.openFile(file);
@@ -266,8 +268,17 @@ export class CellularApp extends HTMLElement {
         this.canvas.fit();
         break;
       case 'toggle-timeline':
-        this.update({ timelineVisible: !this.settings.timelineVisible });
+        this.update({
+          timelineVisible: !this.settings.timelineVisible,
+          // Opening from Window always restores the full panel.
+          timelineMinimized: this.settings.timelineVisible ? this.settings.timelineMinimized : false,
+        });
         this.applyTimelineVisibility();
+        break;
+      case 'toggle-legends':
+        this.update({ legendsVisible: !this.settings.legendsVisible });
+        this.renderPanel();
+        this.applySafeArea();
         this.canvas.fit();
         break;
       case 'multi-mode':
@@ -334,7 +345,19 @@ export class CellularApp extends HTMLElement {
 
   private applyTimelineVisibility(): void {
     this.timeline.toggleAttribute('hidden', !this.settings.timelineVisible);
+    this.timeline.toggleAttribute('minimized', this.settings.timelineVisible && this.settings.timelineMinimized);
     this.applySafeArea();
+  }
+
+  private toggleTimelineMinimized(): void {
+    if (!this.settings.timelineVisible) return;
+    this.update({ timelineMinimized: !this.settings.timelineMinimized });
+    this.applyTimelineVisibility();
+  }
+
+  private closeTimeline(): void {
+    this.update({ timelineVisible: false, timelineMinimized: false });
+    this.applyTimelineVisibility();
   }
 
   /** Keep the fitted scene clear of the menu, the timeline and the legend. */
@@ -342,7 +365,7 @@ export class CellularApp extends HTMLElement {
     const panelHeight = this.panel.getBoundingClientRect().height;
     this.canvas.setSafeArea({
       top: 56,
-      right: this.settings.timelineVisible ? 320 : 24,
+      right: this.settings.timelineVisible && !this.settings.timelineMinimized ? 320 : 24,
       bottom: Math.max(24, panelHeight + 24),
       left: 24,
     });
@@ -437,7 +460,7 @@ export class CellularApp extends HTMLElement {
 
     if (!this.scene) return;
 
-    if (this.scene.legend.length > 0) {
+    if (this.settings.legendsVisible && this.scene.legend.length > 0) {
       const section = document.createElement('section');
       section.className = 'legend';
       for (const entry of this.scene.legend) {

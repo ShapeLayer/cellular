@@ -60,11 +60,6 @@ const MENUS: Array<{ label: string; items: Item[] }> = [
       { label: 'Fit to Screen', action: 'fit' },
       { label: '', divider: true },
       {
-        label: 'Show/Hide Timeline',
-        action: 'toggle-timeline',
-        checkedWhen: (settings) => settings.timelineVisible,
-      },
-      {
         label: 'Show Multiple Commits',
         submenu: [
           ...(Object.keys(MULTI_LABELS) as MultiCommitMode[]).map((mode) => ({
@@ -102,6 +97,21 @@ const MENUS: Array<{ label: string; items: Item[] }> = [
           needsMetric: metric,
           checkedWhen: (settings) => settings.metric === metric,
         })),
+      },
+    ],
+  },
+  {
+    label: 'Panel',
+    items: [
+      {
+        label: 'Timeline',
+        action: 'toggle-timeline',
+        checkedWhen: (settings) => settings.timelineVisible,
+      },
+      {
+        label: 'Legends',
+        action: 'toggle-legends',
+        checkedWhen: (settings) => settings.legendsVisible,
       },
     ],
   },

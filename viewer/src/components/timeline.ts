@@ -65,9 +65,16 @@ const TEMPLATE = `
       overflow: hidden;
     }
     :host([hidden]) { display: none; }
+    :host([minimized]) {
+      top: auto;
+      bottom: 12px;
+      transform: none;
+      width: auto;
+      max-height: none;
+    }
     header {
       display: flex;
-      align-items: baseline;
+      align-items: center;
       justify-content: space-between;
       gap: 8px;
       padding: 8px 10px;
@@ -78,6 +85,29 @@ const TEMPLATE = `
       flex: none;
     }
     header .count { font-weight: 400; color: var(--text-muted); }
+    .title { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+    .controls { display: flex; align-items: center; margin-left: auto; }
+    .control {
+      appearance: none;
+      display: grid;
+      place-items: center;
+      width: 22px;
+      height: 22px;
+      margin: -4px 0 -4px 2px;
+      padding: 0;
+      border: 0;
+      border-radius: 4px;
+      background: transparent;
+      color: var(--text-muted);
+      font: inherit;
+      font-size: 16px;
+      line-height: 1;
+      cursor: pointer;
+    }
+    .control:hover { background: var(--surface-hover); color: var(--text); }
+    .close:hover { background: var(--danger); color: var(--surface); }
+    :host([minimized]) .scroll,
+    :host([minimized]) .hint { display: none; }
     .scroll {
       flex: 1 1 auto;
       overflow: auto;
@@ -164,7 +194,13 @@ const TEMPLATE = `
     }
     .row.selected .oid { color: var(--accent); }
   </style>
-  <header><span>Timeline</span><span class="count"></span></header>
+  <header>
+    <span class="title"><span>Timeline</span><span class="count"></span></span>
+    <span class="controls">
+      <button class="control minimize" type="button" aria-label="Minimize timeline" title="Minimize timeline">−</button>
+      <button class="control close" type="button" aria-label="Close timeline" title="Close timeline">×</button>
+    </span>
+  </header>
   <div class="scroll"><div class="body"></div></div>
   <div class="hint">Click to select · drag to scrub · ctrl+click to add · shift+click for a range</div>
 `;
@@ -177,6 +213,7 @@ export class CellularTimeline extends HTMLElement {
   private viewport!: HTMLElement;
   private body!: HTMLElement;
   private count!: HTMLElement;
+  private minimizeButton!: HTMLButtonElement;
   private rows: HTMLElement[] = [];
   private lines: SVGSVGElement | null = null;
   private scrubbing = false;
@@ -185,6 +222,14 @@ export class CellularTimeline extends HTMLElement {
   private drawnFor = 0;
   /** The commit the list was last scrolled to, so it only moves on a change. */
   private scrolledTo: string | null = null;
+
+  static get observedAttributes(): string[] {
+    return ['minimized'];
+  }
+
+  attributeChangedCallback(name: string): void {
+    if (name === 'minimized') this.syncMinimizeButton();
+  }
 
   connectedCallback(): void {
     // Adding the same handler twice is a no-op, so this also restores what
@@ -204,11 +249,16 @@ export class CellularTimeline extends HTMLElement {
     this.body = root.querySelector('.body') as HTMLElement;
     this.count = root.querySelector('.count') as HTMLElement;
 
+    this.minimizeButton = root.querySelector('.minimize') as HTMLButtonElement;
+    this.minimizeButton.addEventListener('click', () => this.emitPanelAction('timeline-minimize'));
+    root.querySelector('.close')?.addEventListener('click', () => this.emitPanelAction('timeline-close'));
+
     this.body.addEventListener('pointerdown', this.onPointerDown);
     this.body.addEventListener('pointermove', this.onPointerMove);
     this.viewport.addEventListener('pointerleave', this.onPointerLeave);
     this.resizes.observe(this.viewport);
 
+    this.syncMinimizeButton();
     this.render();
   }
 
@@ -253,6 +303,18 @@ export class CellularTimeline extends HTMLElement {
         composed: true,
       }),
     );
+  }
+
+  private emitPanelAction(name: 'timeline-minimize' | 'timeline-close'): void {
+    this.dispatchEvent(new CustomEvent(name, { bubbles: true, composed: true }));
+  }
+
+  private syncMinimizeButton(): void {
+    if (!this.minimizeButton) return;
+    const minimized = this.hasAttribute('minimized');
+    this.minimizeButton.textContent = minimized ? '□' : '−';
+    this.minimizeButton.setAttribute('aria-label', minimized ? 'Restore timeline' : 'Minimize timeline');
+    this.minimizeButton.title = minimized ? 'Restore timeline' : 'Minimize timeline';
   }
 
   private emitHover(snapshot: Snapshot | null, clientX: number, clientY: number): void {
