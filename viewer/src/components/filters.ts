@@ -66,14 +66,15 @@ const TEMPLATE = `
     .close::after { transform: rotate(-45deg); }
     .close:hover { background: var(--danger); color: var(--surface); }
     .help { padding: 7px 10px; border-bottom: 1px solid var(--border); color: var(--text-muted); font-size: 11px; }
-    .rows { overflow: auto; padding: 5px 0; font-family: var(--mono); font-size: 12px; }
-    .row { display: flex; align-items: center; min-height: 25px; }
+    .editor { display: flex; flex: 1 1 auto; overflow: auto; padding: 5px 0; font-family: var(--mono); font-size: 12px; }
+    .gutter { flex: none; width: 30px; border-right: 1px solid var(--border); }
+    .gutter-row { height: 25px; }
     .toggle {
       appearance: none;
-      width: 30px;
-      align-self: stretch;
+      display: block;
+      width: 100%;
+      height: 25px;
       border: 0;
-      border-right: 1px solid var(--border);
       background: transparent;
       color: var(--danger);
       font: inherit;
@@ -81,54 +82,68 @@ const TEMPLATE = `
     }
     .toggle.include { color: var(--accent); }
     .toggle:hover { background: var(--surface-hover); }
-    input {
+    textarea {
       min-width: 0;
       flex: 1;
       box-sizing: border-box;
       border: 0;
       outline: 0;
-      padding: 4px 10px;
+      min-height: 25px;
+      padding: 0 10px;
       background: transparent;
       color: var(--text);
       font: inherit;
+      line-height: 25px;
+      white-space: pre;
+      overflow: hidden;
+      resize: none;
     }
-    .row:focus-within { background: var(--surface-hover); }
+    .editor:focus-within { background: var(--surface-hover); }
   </style>
   <header><span>Filters</span><button class="close" type="button" aria-label="Close filters" title="Close filters">×</button></header>
-  <div class="help">− excludes matching paths or names · + includes them again. Press Enter for a new rule.</div>
-  <div class="rows"></div>
+  <div class="help">− excludes matching paths or names · + includes them again.</div>
+  <div class="editor"><div class="gutter"></div><textarea aria-label="Filter rules" wrap="off" spellcheck="false"></textarea></div>
 `;
 
 export class CellularFilters extends HTMLElement {
   private rules: FilterRule[] = [{ include: false, pattern: '' }];
-  private rows!: HTMLElement;
+  private gutter!: HTMLElement;
+  private editor!: HTMLTextAreaElement;
 
   connectedCallback(): void {
     if (this.shadowRoot) return;
     const root = this.attachShadow({ mode: 'open' });
     root.innerHTML = TEMPLATE;
-    this.rows = root.querySelector('.rows') as HTMLElement;
+    this.gutter = root.querySelector('.gutter') as HTMLElement;
+    this.editor = root.querySelector('textarea') as HTMLTextAreaElement;
     root.querySelector('.close')?.addEventListener('click', () => {
       this.dispatchEvent(new CustomEvent('filters-close', { bubbles: true, composed: true }));
     });
-    this.render();
+    this.editor.addEventListener('input', this.onInput);
+    this.renderEditor();
   }
 
   setRules(rules: FilterRule[]): void {
     this.rules = rules.length > 0 ? rules.map((rule) => ({ ...rule })) : [{ include: false, pattern: '' }];
-    this.render();
+    this.renderEditor();
   }
 
   focusEditor(): void {
-    requestAnimationFrame(() => (this.rows.querySelector('input') as HTMLInputElement | null)?.focus());
+    requestAnimationFrame(() => this.editor.focus());
   }
 
-  private render(): void {
-    if (!this.rows) return;
-    this.rows.textContent = '';
+  private renderEditor(): void {
+    if (!this.editor) return;
+    this.editor.value = this.rules.map((rule) => rule.pattern).join('\n');
+    this.renderGutter();
+    this.fitEditorHeight();
+  }
+
+  private renderGutter(): void {
+    this.gutter.textContent = '';
     this.rules.forEach((rule, index) => {
       const row = document.createElement('div');
-      row.className = 'row';
+      row.className = 'gutter-row';
       const toggle = document.createElement('button');
       toggle.className = rule.include ? 'toggle include' : 'toggle';
       toggle.type = 'button';
@@ -137,30 +152,31 @@ export class CellularFilters extends HTMLElement {
       toggle.addEventListener('click', () => {
         this.rules[index].include = !this.rules[index].include;
         this.emitChange();
-        this.render();
+        this.renderGutter();
       });
-      const input = document.createElement('input');
-      input.type = 'text';
-      input.value = rule.pattern;
-      input.placeholder = 'path or name';
-      input.spellcheck = false;
-      input.addEventListener('input', () => {
-        this.rules[index].pattern = input.value;
-        this.emitChange();
-      });
-      input.addEventListener('keydown', (event) => this.onKeyDown(event, index));
-      row.append(toggle, input);
-      this.rows.append(row);
+      row.append(toggle);
+      this.gutter.append(row);
     });
   }
 
-  private onKeyDown(event: KeyboardEvent, index: number): void {
-    if (event.key !== 'Enter') return;
-    event.preventDefault();
-    this.rules.splice(index + 1, 0, { include: false, pattern: '' });
+  private onInput = (): void => {
+    const lines = this.editor.value.split('\n');
+    // Preserve a marker with its unchanged text when rows move because of a
+    // multi-line edit. Newly typed lines always start as exclusions.
+    const remaining = [...this.rules];
+    this.rules = lines.map((pattern) => {
+      const previous = remaining.findIndex((rule) => rule.pattern === pattern);
+      const include = previous === -1 ? false : remaining.splice(previous, 1)[0].include;
+      return { include, pattern };
+    });
+    this.renderGutter();
+    this.fitEditorHeight();
     this.emitChange();
-    this.render();
-    (this.rows.querySelectorAll('input')[index + 1] as HTMLInputElement | undefined)?.focus();
+  };
+
+  private fitEditorHeight(): void {
+    this.editor.style.height = '0';
+    this.editor.style.height = `${Math.max(25, this.editor.scrollHeight)}px`;
   }
 
   private emitChange(): void {
