@@ -105,6 +105,19 @@ const TEMPLATE = `
       cursor: pointer;
     }
     .control:hover { background: var(--surface-hover); color: var(--text); }
+    .close { position: relative; font-size: 0; }
+    .close::before, .close::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      margin: auto;
+      width: 10px;
+      height: 1.5px;
+      border-radius: 1px;
+      background: currentColor;
+    }
+    .close::before { transform: rotate(45deg); }
+    .close::after { transform: rotate(-45deg); }
     .close:hover { background: var(--danger); color: var(--surface); }
     :host([minimized]) .scroll,
     :host([minimized]) .hint { display: none; }

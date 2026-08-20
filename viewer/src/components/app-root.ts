@@ -4,6 +4,7 @@
  */
 
 import './canvas';
+import './filters';
 import './menu-bar';
 import './timeline';
 import './tooltip';
@@ -21,6 +22,7 @@ import {
 import { buildScene, type Scene } from '../render/scene';
 import { loadSettings, saveSettings, type Settings } from '../state/store';
 import type { CellularCanvas, HoverDetail } from './canvas';
+import type { CellularFilters, FilterRule } from './filters';
 import type { MenuActionDetail } from './menu-bar';
 import type { CellularTimeline, CommitHoverDetail } from './timeline';
 import type { CellularTooltip } from './tooltip';
@@ -98,6 +100,7 @@ const TEMPLATE = `
     <span>Release a <code>.cellexport</code> file here to load its index.</span>
   </div></div>
   <cellular-menu></cellular-menu>
+  <cellular-filters hidden></cellular-filters>
   <cellular-timeline hidden></cellular-timeline>
   <cellular-tooltip></cellular-tooltip>
   <div class="panel"></div>
@@ -118,10 +121,12 @@ export class CellularApp extends HTMLElement {
     setState(settings: Settings, available?: Metric[]): void;
   };
   private timeline!: CellularTimeline;
+  private filters!: CellularFilters;
   private tooltip!: CellularTooltip;
   private panel!: HTMLElement;
   private picker!: HTMLInputElement;
   private dragDepth = 0;
+  private filterRules: FilterRule[] = [];
 
   connectedCallback(): void {
     if (this.shadowRoot) return;
@@ -133,6 +138,7 @@ export class CellularApp extends HTMLElement {
       setState(settings: Settings, available?: Metric[]): void;
     };
     this.timeline = root.querySelector('cellular-timeline') as CellularTimeline;
+    this.filters = root.querySelector('cellular-filters') as CellularFilters;
     this.tooltip = root.querySelector('cellular-tooltip') as CellularTooltip;
     this.panel = root.querySelector('.panel') as HTMLElement;
     this.picker = root.querySelector('input[type=file]') as HTMLInputElement;
@@ -151,6 +157,11 @@ export class CellularApp extends HTMLElement {
     );
     root.addEventListener('timeline-minimize', () => this.toggleTimelineMinimized());
     root.addEventListener('timeline-close', () => this.closeTimeline());
+    root.addEventListener('filters-change', (event) => {
+      this.filterRules = (event as CustomEvent<FilterRule[]>).detail;
+      this.rebuild(true);
+    });
+    root.addEventListener('filters-close', () => this.filters.setAttribute('hidden', ''));
     this.picker.addEventListener('change', () => {
       const file = this.picker.files?.[0];
       if (file) void this.openFile(file);
@@ -254,6 +265,11 @@ export class CellularApp extends HTMLElement {
     switch (detail.action) {
       case 'open':
         this.picker.click();
+        break;
+      case 'open-filters':
+        this.filters.removeAttribute('hidden');
+        this.filters.setRules(this.filterRules);
+        this.filters.focusEditor();
         break;
       case 'zoom-in':
         this.canvas.zoomBy(1.25);
@@ -382,7 +398,10 @@ export class CellularApp extends HTMLElement {
   }
 
   private rebuild(keepViewportIfPossible: boolean): void {
-    const chosen = this.snapshots.filter((snapshot) => this.selected.includes(snapshot.oid));
+    const chosen = filterSnapshots(
+      this.snapshots.filter((snapshot) => this.selected.includes(snapshot.oid)),
+      this.filterRules,
+    );
     const previous = this.scene;
     this.scene = buildScene(chosen, this.settings);
     const sameShape =
@@ -491,6 +510,27 @@ export class CellularApp extends HTMLElement {
       this.panel.append(section);
     }
   }
+}
+
+/** An inclusion wins over exclusion, so a specific `+` can restore one child of a `-` path. */
+function filterSnapshots(snapshots: Snapshot[], rules: FilterRule[]): Snapshot[] {
+  const active = rules.filter((rule) => rule.pattern.trim() !== '');
+  if (active.length === 0) return snapshots;
+  return snapshots.map((snapshot) => ({
+    ...snapshot,
+    modules: snapshot.modules.filter((module) => includeModule(module.path, active)),
+  }));
+}
+
+function includeModule(path: string, rules: FilterRule[]): boolean {
+  const matches = (rule: FilterRule) => {
+    const pattern = rule.pattern.trim().replace(/^\.\//, '');
+    const name = path.slice(path.lastIndexOf('/') + 1);
+    return pattern.endsWith('/') ? path.startsWith(pattern) : path === pattern || name === pattern;
+  };
+  // Any explicit include takes priority over all matching exclusions.
+  if (rules.some((rule) => rule.include && matches(rule))) return true;
+  return !rules.some((rule) => !rule.include && matches(rule));
 }
 
 function hasFiles(event: DragEvent): boolean {

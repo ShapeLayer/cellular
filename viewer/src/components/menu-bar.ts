@@ -52,6 +52,10 @@ const MENUS: Array<{ label: string; items: Item[] }> = [
     items: [{ label: 'Open…', action: 'open' }],
   },
   {
+    label: 'Edit',
+    items: [{ label: 'Filters…', action: 'open-filters' }],
+  },
+  {
     label: 'View',
     items: [
       { label: 'Zoom In', action: 'zoom-in' },
