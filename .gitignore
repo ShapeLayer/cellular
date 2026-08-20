@@ -1,0 +1,8 @@
+.claude
+
+# Cellular index data, but keep the project config
+.cellular
+!.cellular/config.json
+
+# macOS
+.DS_Store
