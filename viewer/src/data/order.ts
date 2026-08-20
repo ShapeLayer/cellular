@@ -16,14 +16,21 @@ function newerFirst(left: Snapshot, right: Snapshot): number {
   return right.commitTime - left.commitTime || right.oid.localeCompare(left.oid);
 }
 
-/** Insert into a list that is kept sorted by {@link newerFirst}. */
+/**
+ * Insert into a list that is kept sorted by {@link newerFirst}.
+ *
+ * The item belongs after everything {@link newerFirst} ranks ahead of it, so a
+ * hit walks the search to the right. Reading the comparison the other way puts
+ * every newly ready commit at the wrong end of the queue, and the walk then
+ * empties out the oldest branch tips before it ever reaches the newest one.
+ */
 function insertSorted(list: Snapshot[], item: Snapshot): void {
   let low = 0;
   let high = list.length;
   while (low < high) {
     const middle = (low + high) >> 1;
-    if (newerFirst(list[middle], item) <= 0) high = middle;
-    else low = middle + 1;
+    if (newerFirst(list[middle], item) <= 0) low = middle + 1;
+    else high = middle;
   }
   list.splice(low, 0, item);
 }

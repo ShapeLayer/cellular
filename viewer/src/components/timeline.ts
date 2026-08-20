@@ -1,27 +1,43 @@
 /**
- * The timeline control: a git graph pinned to the right of the window.
+ * The timeline control: a commit graph pinned to the right of the window.
  *
- * Commits are drawn newest first. Lanes come from the parent links the runner
- * stores, so branches and merges keep their shape instead of collapsing into a
- * straight list. Commits whose parents are not in the index end in a dashed
- * stub, which is what a sparse index looks like.
+ * Commits are drawn newest first, one row each. Lanes come from the parent
+ * links the runner stores, so branches and merges keep their shape instead of
+ * collapsing into a straight list; `layout/commitgraph` works them out. This
+ * file is only the drawing: rows are ordinary elements, so a long message
+ * simply ends in an ellipsis, and the graph is a single overlaid SVG that owns
+ * every line and node.
+ *
+ * Lines follow the shape GitKraken's commit graph uses. A line between two
+ * lanes runs straight down the one further right and turns a rounded corner at
+ * the end sitting in the other, so a branch leaves its merge sideways at the
+ * top and rejoins its parent line at the bottom. Commits whose parents are not
+ * in the index end in a dashed stub, which is what a sparse index looks like.
  */
 
-import { formatCommitTime, shortOid, type Snapshot } from '../model';
+import { buildCommitGraph, type CommitGraph } from '../layout/commitgraph';
+import type { Snapshot } from '../model';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
-const ROW = 26;
-const LANE = 14;
-const GRAPH_LEFT = 14;
-const TOP = 10;
 
-interface Row {
-  snapshot: Snapshot;
-  lane: number;
-  edges: Array<{ toIndex: number; toLane: number }>;
-  /** True when history continues past the commits held in this index. */
-  truncated: boolean;
-}
+/** Height of one commit row. */
+const ROW = 26;
+/** Preferred distance between lanes, and how far they may be squeezed. */
+const LANE = 14;
+const LANE_MIN = 9;
+/** Space left of the first lane, and again right of the last one. */
+const GRAPH_PAD = 12;
+/** The graph gives way to the message once the rows get this tight. */
+const TEXT_MIN = 150;
+/** Radius of the turn a line makes on its way into another lane. */
+const CORNER = 10;
+/** How far the stub of a parent outside the index hangs below its commit. */
+const STUB = 9;
+/**
+ * Refs past this many collapse into a `+n` chip. The panel is narrow, and the
+ * commit's tooltip lists all of them anyway.
+ */
+const REF_LIMIT = 1;
 
 export interface CommitHoverDetail {
   snapshot: Snapshot | null;
@@ -62,7 +78,12 @@ const TEMPLATE = `
       flex: none;
     }
     header .count { font-weight: 400; color: var(--text-muted); }
-    .scroll { overflow-y: auto; overflow-x: hidden; flex: 1 1 auto; }
+    .scroll {
+      flex: 1 1 auto;
+      overflow: auto;
+      overscroll-behavior: contain;
+      padding: 6px 0;
+    }
     .hint {
       padding: 6px 10px 8px;
       border-top: 1px solid var(--border);
@@ -70,61 +91,149 @@ const TEMPLATE = `
       font-size: 11px;
       flex: none;
     }
-    svg { display: block; user-select: none; touch-action: none; }
-    .row-hit { fill: transparent; cursor: pointer; }
-    .row-hit:hover { fill: var(--surface-hover); }
-    .row-hit.selected { fill: var(--accent-soft); }
-    .edge { fill: none; stroke: var(--border-strong); stroke-width: 1.5; pointer-events: none; }
-    .edge.stub { stroke-dasharray: 3 3; }
-    .dot { fill: var(--surface); stroke: var(--border-strong); stroke-width: 1.5; }
-    .dot.selected { fill: var(--accent); stroke: var(--accent); }
-    .oid { font-family: var(--mono); font-size: 10.5px; fill: var(--text-muted); }
-    .oid.selected { fill: var(--accent); font-weight: 600; }
-    .summary { font-size: 11.5px; fill: var(--text); }
-    .refs { font-size: 10px; fill: var(--accent); font-family: var(--mono); }
     .empty { padding: 14px 12px; color: var(--text-muted); font-size: 12px; }
+
+    /* The graph is laid over the rows: its lines have to stay visible across a
+       selected row, and its nodes have to stay on top of the lines. */
+    .body { position: relative; user-select: none; }
+    .lines { position: absolute; left: 0; top: 0; pointer-events: none; }
+
+    .row {
+      --row-bg: transparent;
+      position: relative;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      height: ${ROW}px;
+      padding-left: calc(var(--graph, 0px) + 6px);
+      padding-right: 9px;
+      background: var(--row-bg);
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .row:hover { --row-bg: var(--surface-hover); }
+    .row.selected { --row-bg: var(--accent-soft); }
+
+    .refs {
+      display: flex;
+      gap: 4px;
+      flex: 0 1 auto;
+      /* Wide enough that a trimmed branch name is still worth reading, and
+         never so wide that it takes the message's room. */
+      min-width: 56px;
+      max-width: 55%;
+      overflow: hidden;
+    }
+    .chip {
+      box-sizing: border-box;
+      flex: 0 1 auto;
+      min-width: 0;
+      max-width: 132px;
+      white-space: nowrap;
+      height: 16px;
+      padding: 0 5px;
+      border: 1px solid var(--accent);
+      border-radius: 999px;
+      color: var(--accent);
+      font-family: var(--mono);
+      font-size: 9.5px;
+      line-height: 14px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    /* A remote is a copy of a branch that lives elsewhere; it should not read
+       as loudly as the local one standing next to it. */
+    .chip.remote { border-color: var(--border-strong); color: var(--text-muted); }
+    .chip.more { flex: none; max-width: none; border-style: dashed; }
+
+    .message {
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-size: 11.5px;
+      color: var(--text);
+    }
+    .message.empty-message { color: var(--text-faint); font-style: italic; }
+    .row.selected .message { font-weight: 600; }
+    .oid {
+      flex: none;
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--text-faint);
+    }
+    .row.selected .oid { color: var(--accent); }
   </style>
   <header><span>Timeline</span><span class="count"></span></header>
-  <div class="scroll"></div>
+  <div class="scroll"><div class="body"></div></div>
   <div class="hint">Click to select · drag to scrub · ctrl+click to add · shift+click for a range</div>
 `;
 
 export class CellularTimeline extends HTMLElement {
   private snapshots: Snapshot[] = [];
+  private graph: CommitGraph = { nodes: [], edges: [], lanes: 1 };
   private selected = new Set<string>();
   private anchor: string | null = null;
-  private rows: Row[] = [];
-  private list!: HTMLElement;
+  private viewport!: HTMLElement;
+  private body!: HTMLElement;
   private count!: HTMLElement;
+  private rows: HTMLElement[] = [];
+  private lines: SVGSVGElement | null = null;
   private scrubbing = false;
+  private resizes: ResizeObserver | null = null;
+  /** Width the graph was last drawn for, so a resize only redraws on a change. */
+  private drawnFor = 0;
   /** The commit the list was last scrolled to, so it only moves on a change. */
   private scrolledTo: string | null = null;
 
   connectedCallback(): void {
-    if (this.shadowRoot) return;
+    // Adding the same handler twice is a no-op, so this also restores what
+    // leaving the document gave up.
+    window.addEventListener('pointerup', this.endScrub);
+    // The panel is hidden until an index loads, and a scrollbar appearing
+    // narrows the rows; both change how much room the lanes have.
+    this.resizes ??= new ResizeObserver(() => this.drawGraph());
+    if (this.shadowRoot) {
+      this.resizes.observe(this.viewport);
+      return;
+    }
+
     const root = this.attachShadow({ mode: 'open' });
     root.innerHTML = TEMPLATE;
-    this.list = root.querySelector('.scroll') as HTMLElement;
-    // A pointer released outside the graph must also end a scrub.
-    window.addEventListener('pointerup', () => {
-      this.scrubbing = false;
-    });
+    this.viewport = root.querySelector('.scroll') as HTMLElement;
+    this.body = root.querySelector('.body') as HTMLElement;
     this.count = root.querySelector('.count') as HTMLElement;
+
+    this.body.addEventListener('pointerdown', this.onPointerDown);
+    this.body.addEventListener('pointermove', this.onPointerMove);
+    this.viewport.addEventListener('pointerleave', this.onPointerLeave);
+    this.resizes.observe(this.viewport);
+
     this.render();
+  }
+
+  disconnectedCallback(): void {
+    // A pointer released outside the graph must also end a scrub, which is
+    // why the listener is on the window and has to be taken back here.
+    window.removeEventListener('pointerup', this.endScrub);
+    this.resizes?.disconnect();
   }
 
   setData(snapshots: Snapshot[], selected: string[]): void {
     this.snapshots = snapshots;
+    this.graph = buildCommitGraph(snapshots);
     this.selected = new Set(selected);
     this.keepAnchor(selected);
-    this.rows = layout(snapshots);
+    this.scrolledTo = null;
     this.render();
   }
 
   setSelection(selected: string[]): void {
     this.selected = new Set(selected);
     this.keepAnchor(selected);
-    this.render();
+    // Only the row styling changes, so the graph itself is left standing.
+    this.paintSelection();
+    this.reveal();
   }
 
   /**
@@ -156,17 +265,56 @@ export class CellularTimeline extends HTMLElement {
     );
   }
 
+  // ------------------------------------------------------------- pointing --
+
+  /** The row an event landed on, or -1 for the padding around them. */
+  private rowAt(event: PointerEvent): number {
+    const row = (event.target as HTMLElement | null)?.closest?.('.row') as HTMLElement | null;
+    const index = row?.dataset.row;
+    return index === undefined ? -1 : Number(index);
+  }
+
+  private onPointerDown = (event: PointerEvent): void => {
+    const index = this.rowAt(event);
+    if (index < 0) return;
+    this.scrubbing = !event.shiftKey && !event.ctrlKey && !event.metaKey;
+    this.select(index, event);
+  };
+
+  private onPointerMove = (event: PointerEvent): void => {
+    const index = this.rowAt(event);
+    if (index < 0) {
+      this.emitHover(null, 0, 0);
+      return;
+    }
+    const snapshot = this.graph.nodes[index].snapshot;
+    this.emitHover(snapshot, event.clientX, event.clientY);
+    // Dragging across the graph walks the selection along with the pointer,
+    // narrowing a range back down to the one commit under it.
+    if (!this.scrubbing) return;
+    const alone = this.selected.size === 1 && this.selected.has(snapshot.oid);
+    if (!alone) this.emitSelection([snapshot.oid]);
+  };
+
+  private onPointerLeave = (): void => {
+    this.scrubbing = false;
+    this.emitHover(null, 0, 0);
+  };
+
+  private endScrub = (): void => {
+    this.scrubbing = false;
+  };
+
   private select(index: number, event: PointerEvent | MouseEvent): void {
-    const row = this.rows[index];
-    if (!row) return;
-    const oid = row.snapshot.oid;
-    const order = this.rows.map((entry) => entry.snapshot.oid);
+    const node = this.graph.nodes[index];
+    if (!node) return;
+    const oid = node.snapshot.oid;
+    const order = this.graph.nodes.map((entry) => entry.snapshot.oid);
 
     if (event.shiftKey && this.anchor) {
       const from = order.indexOf(this.anchor);
-      const to = index;
       if (from !== -1) {
-        const [low, high] = from <= to ? [from, to] : [to, from];
+        const [low, high] = from <= index ? [from, index] : [index, from];
         this.emitSelection(order.slice(low, high + 1));
         return;
       }
@@ -184,212 +332,200 @@ export class CellularTimeline extends HTMLElement {
     this.emitSelection([oid]);
   }
 
-  private render(): void {
-    if (!this.list) return;
-    this.count.textContent = this.snapshots.length > 0 ? `${this.snapshots.length} commits` : '';
-    this.list.textContent = '';
+  // ------------------------------------------------------------- drawing --
 
-    if (this.rows.length === 0) {
+  private render(): void {
+    if (!this.body) return;
+    this.count.textContent = this.snapshots.length > 0 ? `${this.snapshots.length} commits` : '';
+    this.body.textContent = '';
+    this.rows = [];
+    this.lines = null;
+    this.drawnFor = 0;
+
+    if (this.graph.nodes.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'empty';
       empty.textContent = 'No commits loaded.';
-      this.list.append(empty);
+      this.body.append(empty);
       return;
     }
 
-    const lanes = Math.max(1, ...this.rows.map((row) => row.lane + 1));
-    const graphWidth = GRAPH_LEFT + lanes * LANE;
-    const width = 290;
-    const height = TOP * 2 + this.rows.length * ROW;
+    for (const node of this.graph.nodes) this.rows.push(buildRow(node.snapshot, node.row));
+    this.body.append(...this.rows);
 
-    const svg = document.createElementNS(SVG_NS, 'svg');
-    svg.setAttribute('width', String(width));
-    svg.setAttribute('height', String(height));
-    svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+    // Added last so the lines and nodes paint over the row backgrounds; a
+    // selected row must not swallow the branch crossing it.
+    this.lines = document.createElementNS(SVG_NS, 'svg');
+    this.lines.setAttribute('class', 'lines');
+    this.body.append(this.lines);
 
-    const laneX = (lane: number) => GRAPH_LEFT + lane * LANE;
-    const rowY = (index: number) => TOP + index * ROW + ROW / 2;
+    this.paintSelection();
+    this.drawGraph();
+    this.reveal();
+  }
 
-    // Row backgrounds must sit behind the graph. Otherwise a selected row's
-    // highlight hides any branch line that crosses it.
+  private paintSelection(): void {
     this.rows.forEach((row, index) => {
-      const selected = this.selected.has(row.snapshot.oid);
-      const hit = document.createElementNS(SVG_NS, 'rect');
-      hit.setAttribute('class', `row-hit${selected ? ' selected' : ''}`);
-      hit.setAttribute('x', '0');
-      hit.setAttribute('y', String(TOP + index * ROW));
-      hit.setAttribute('width', String(width));
-      hit.setAttribute('height', String(ROW));
-      hit.addEventListener('pointerdown', (event) => {
-        this.scrubbing = !event.shiftKey && !event.ctrlKey && !event.metaKey;
-        this.select(index, event);
-      });
-      hit.addEventListener('pointerenter', (event) => {
-        this.emitHover(row.snapshot, event.clientX, event.clientY);
-        // Dragging across the graph walks the selection along with the pointer.
-        if (this.scrubbing) this.emitSelection([row.snapshot.oid]);
-      });
-      hit.addEventListener('pointermove', (event) =>
-        this.emitHover(row.snapshot, event.clientX, event.clientY),
+      row.classList.toggle('selected', this.selected.has(this.graph.nodes[index].snapshot.oid));
+    });
+  }
+
+  /**
+   * Place the lanes and draw them. Lanes keep their spacing until the graph
+   * would leave the message no room, and are squeezed together after that.
+   */
+  private drawGraph(): void {
+    if (!this.lines) return;
+    const width = this.viewport.clientWidth;
+    // Hidden, or not laid out yet: there is nothing to measure against.
+    if (width <= 0 || width === this.drawnFor) return;
+    this.drawnFor = width;
+
+    const spread = this.graph.lanes - 1;
+    const room = Math.max(0, width - TEXT_MIN - GRAPH_PAD * 2);
+    const step = spread === 0 ? LANE : Math.max(LANE_MIN, Math.min(LANE, room / spread));
+    const graph = GRAPH_PAD * 2 + spread * step;
+    const height = this.graph.nodes.length * ROW;
+
+    this.body.style.setProperty('--graph', `${graph}px`);
+    // A graph too wide even for the squeeze scrolls sideways rather than
+    // sitting on top of the messages.
+    this.body.style.minWidth = `${graph + TEXT_MIN}px`;
+
+    this.lines.setAttribute('width', String(graph));
+    this.lines.setAttribute('height', String(height));
+    this.lines.setAttribute('viewBox', `0 0 ${graph} ${height}`);
+    this.lines.textContent = '';
+
+    const laneX = (lane: number) => GRAPH_PAD + lane * step;
+    const rowY = (row: number) => row * ROW + ROW / 2;
+
+    const fragment = document.createDocumentFragment();
+    for (const edge of this.graph.edges) {
+      const path = edgePath(
+        laneX(edge.fromLane),
+        rowY(edge.fromRow),
+        laneX(edge.toLane),
+        rowY(edge.toRow),
+        edge.runsIn === edge.toLane,
       );
-      if (selected) hit.dataset.selected = 'true';
-      const stamp = document.createElementNS(SVG_NS, 'title');
-      stamp.textContent = formatCommitTime(row.snapshot);
-      hit.append(stamp);
-      svg.append(hit);
-    });
-
-    // Edges come after backgrounds, so they remain visible over a selection.
-    this.rows.forEach((row, index) => {
-      const x1 = laneX(row.lane);
-      const y1 = rowY(index);
-      for (const edge of row.edges) {
-        const x2 = laneX(edge.toLane);
-        const y2 = rowY(edge.toIndex);
-        const path = document.createElementNS(SVG_NS, 'path');
-        path.setAttribute('class', 'edge');
-        path.setAttribute(
-          'd',
-          x1 === x2
-            ? `M ${x1} ${y1} L ${x2} ${y2}`
-            : `M ${x1} ${y1} C ${x1} ${y1 + ROW * 0.6}, ${x2} ${y2 - ROW * 0.6}, ${x2} ${y2}`,
-        );
-        svg.append(path);
-      }
-      if (row.truncated) {
-        const stub = document.createElementNS(SVG_NS, 'path');
-        stub.setAttribute('class', 'edge stub');
-        stub.setAttribute('d', `M ${x1} ${y1} L ${x1} ${y1 + ROW * 0.7}`);
-        svg.append(stub);
-      }
-    });
-
-    this.rows.forEach((row, index) => {
-      const selected = this.selected.has(row.snapshot.oid);
-      const y = rowY(index);
-
+      fragment.append(line(path));
+    }
+    for (const node of this.graph.nodes) {
+      if (!node.truncated) continue;
+      const x = laneX(node.lane);
+      const y = rowY(node.row);
+      fragment.append(line(`M ${x} ${y} V ${y + STUB}`, true));
+    }
+    for (const node of this.graph.nodes) {
       const dot = document.createElementNS(SVG_NS, 'circle');
-      dot.setAttribute('class', `dot${selected ? ' selected' : ''}`);
-      dot.setAttribute('cx', String(laneX(row.lane)));
-      dot.setAttribute('cy', String(y));
-      dot.setAttribute('r', selected ? '5' : '4');
-      dot.setAttribute('pointer-events', 'none');
-      svg.append(dot);
-
-      const oid = document.createElementNS(SVG_NS, 'text');
-      oid.setAttribute('class', `oid${selected ? ' selected' : ''}`);
-      oid.setAttribute('x', String(graphWidth + 6));
-      oid.setAttribute('y', String(y - 3));
-      oid.setAttribute('pointer-events', 'none');
-      oid.textContent = shortOid(row.snapshot.oid).slice(0, 8);
-      svg.append(oid);
-
-      if (row.snapshot.refs.length > 0) {
-        const refs = document.createElementNS(SVG_NS, 'text');
-        refs.setAttribute('class', 'refs');
-        refs.setAttribute('x', String(graphWidth + 60));
-        refs.setAttribute('y', String(y - 3));
-        refs.setAttribute('pointer-events', 'none');
-        refs.textContent = row.snapshot.refs.join(', ');
-        svg.append(refs);
-      }
-
-      const summary = document.createElementNS(SVG_NS, 'text');
-      summary.setAttribute('class', 'summary');
-      summary.setAttribute('x', String(graphWidth + 6));
-      summary.setAttribute('y', String(y + 9));
-      summary.setAttribute('pointer-events', 'none');
-      summary.textContent = row.snapshot.summary || '(no message)';
-      svg.append(summary);
-      clampText(summary, width - graphWidth - 12);
-
-    });
-
-    svg.addEventListener('pointerleave', () => {
-      this.scrubbing = false;
-      this.emitHover(null, 0, 0);
-    });
-    svg.addEventListener('pointerup', () => {
-      this.scrubbing = false;
-    });
-
-    this.list.append(svg);
-    this.revealSelection(svg);
+      dot.setAttribute('cx', String(laneX(node.lane)));
+      dot.setAttribute('cy', String(rowY(node.row)));
+      dot.setAttribute('r', '4.5');
+      // A merge is drawn hollow, so a commit that brings two lines together is
+      // recognisable without reading its message.
+      dot.setAttribute('fill', node.merge ? 'var(--surface)' : 'var(--text-muted)');
+      dot.setAttribute('stroke', 'var(--text-muted)');
+      dot.setAttribute('stroke-width', '1.75');
+      fragment.append(dot);
+    }
+    this.lines.append(fragment);
   }
 
   /**
    * Bring the first selected commit into view. With a long history a scrub or
    * a range selection easily lands off screen.
    */
-  private revealSelection(svg: SVGSVGElement): void {
-    const first = this.rows.findIndex((row) => this.selected.has(row.snapshot.oid));
+  private reveal(): void {
+    const first = this.graph.nodes.findIndex((node) => this.selected.has(node.snapshot.oid));
     if (first < 0) return;
-    const oid = this.rows[first].snapshot.oid;
+    const oid = this.graph.nodes[first].snapshot.oid;
     // Only move when the selection changed, or the list would fight the user
     // scrolling through it.
     if (oid === this.scrolledTo) return;
     this.scrolledTo = oid;
-
-    const target = svg.querySelector('[data-selected]');
-    target?.scrollIntoView({ block: 'nearest' });
+    this.rows[first]?.scrollIntoView({ block: 'nearest' });
   }
 }
 
-/** Trim an SVG text node until it fits, ending with an ellipsis. */
-function clampText(node: SVGTextElement, maxWidth: number): void {
-  const original = node.textContent ?? '';
-  if (node.getComputedTextLength?.() <= maxWidth) return;
-  let text = original;
-  while (text.length > 1 && node.getComputedTextLength() > maxWidth) {
-    text = text.slice(0, -1);
-    node.textContent = `${text}…`;
-  }
+function line(path: string, dashed = false): SVGPathElement {
+  const element = document.createElementNS(SVG_NS, 'path');
+  element.setAttribute('d', path);
+  element.setAttribute('fill', 'none');
+  element.setAttribute('stroke', 'var(--text-faint)');
+  element.setAttribute('stroke-width', '1.75');
+  element.setAttribute('stroke-linecap', 'round');
+  if (dashed) element.setAttribute('stroke-dasharray', '2 3');
+  return element;
 }
 
-/** Assign a lane to every commit, newest first. */
-function layout(snapshots: Snapshot[]): Row[] {
-  // The loader already ordered these topologically, oldest first, so the graph
-  // holds up even when commits share a timestamp.
-  const ordered = [...snapshots].reverse();
-  const indexOf = new Map(ordered.map((snapshot, index) => [snapshot.oid, index]));
+/**
+ * A line from a commit to one of its parents.
+ *
+ * `intoParent` says the straight run belongs to the parent's lane, so the
+ * corner is turned at the top, right under the commit: that is a merge
+ * reaching out to the branch it took in. Otherwise the run stays in the
+ * commit's own lane and turns in at the bottom, which is a branch rejoining
+ * the line it grew out of.
+ */
+function edgePath(
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  intoParent: boolean,
+): string {
+  if (x1 === x2) return `M ${x1} ${y1} V ${y2}`;
+  const down = y2 >= y1 ? 1 : -1;
+  const step = Math.sign(x2 - x1);
+  const radius = Math.max(2, Math.min(CORNER, Math.abs(x2 - x1), Math.abs(y2 - y1) / 2));
+  if (intoParent) {
+    const turn = y1 + down * radius;
+    return `M ${x1} ${y1} H ${x2 - step * radius} Q ${x2} ${y1} ${x2} ${turn} V ${y2}`;
+  }
+  const turn = y2 - down * radius;
+  return `M ${x1} ${y1} V ${turn} Q ${x1} ${y2} ${x1 + step * radius} ${y2} H ${x2}`;
+}
 
-  // Each slot holds the commit the lane is currently waiting to reach.
-  const lanes: Array<string | null> = [];
-  const firstFree = (): number => {
-    const free = lanes.indexOf(null);
-    if (free !== -1) return free;
-    lanes.push(null);
-    return lanes.length - 1;
-  };
+function buildRow(snapshot: Snapshot, index: number): HTMLElement {
+  const row = document.createElement('div');
+  row.className = 'row';
+  row.dataset.row = String(index);
 
-  return ordered.map((snapshot) => {
-    let lane = lanes.indexOf(snapshot.oid);
-    if (lane === -1) lane = firstFree();
-    lanes[lane] = null;
+  if (snapshot.refs.length > 0) row.append(...buildRefs(snapshot.refs));
 
-    const parents = snapshot.parents.filter((parent) => indexOf.has(parent));
-    const edges = parents.map((parent, order) => {
-      const existing = lanes.indexOf(parent);
-      let target: number;
-      if (existing !== -1) {
-        target = existing;
-      } else if (order === 0 && lanes[lane] === null) {
-        target = lane;
-        lanes[lane] = parent;
-      } else {
-        target = firstFree();
-        lanes[target] = parent;
-      }
-      return { toIndex: indexOf.get(parent) as number, toLane: target };
-    });
+  const message = document.createElement('span');
+  message.className = snapshot.summary ? 'message' : 'message empty-message';
+  message.textContent = snapshot.summary || '(no message)';
+  row.append(message);
 
-    return {
-      snapshot,
-      lane,
-      edges,
-      truncated: parents.length === 0 && snapshot.parents.length > 0,
-    };
-  });
+  const oid = document.createElement('span');
+  oid.className = 'oid';
+  oid.textContent = snapshot.oid.slice(0, 7);
+  row.append(oid);
+  return row;
+}
+
+/** Branch and tag chips, capped so a busy commit cannot crowd out its message. */
+function buildRefs(refs: string[]): HTMLElement[] {
+  const strip = document.createElement('span');
+  strip.className = 'refs';
+  for (const ref of refs.slice(0, REF_LIMIT)) {
+    const chip = document.createElement('span');
+    // The runner shortens every ref, which leaves a remote as `origin/main`.
+    chip.className = ref.includes('/') ? 'chip remote' : 'chip';
+    chip.textContent = ref;
+    strip.append(chip);
+  }
+  if (refs.length <= REF_LIMIT) return [strip];
+
+  // The counter stands beside the strip rather than inside it: the names are
+  // free to be trimmed, but how many were left out is not.
+  const more = document.createElement('span');
+  more.className = 'chip more';
+  more.textContent = `+${refs.length - REF_LIMIT}`;
+  more.title = refs.slice(REF_LIMIT).join(', ');
+  return [strip, more];
 }
 
 customElements.define('cellular-timeline', CellularTimeline);
