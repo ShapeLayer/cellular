@@ -1,5 +1,6 @@
 # Cellular
 
+![](./.static/runner.png)  
 ![](./.static/viewer.png)  
 
 Cellular parses your project's source code and groups it by structure (typically at the module directory level) to display it as a heatmap graph. By visualizing data across multiple commits, you can track the quantitative evolution of your project over time.
